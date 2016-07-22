@@ -1,8 +1,8 @@
 import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Dimension;
-import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -10,17 +10,26 @@ import java.awt.Shape;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.geom.Line2D;
-import java.awt.geom.Rectangle2D;
-import java.io.*;
 import java.util.ArrayList;
 import java.util.Scanner;
+import java.util.concurrent.CountDownLatch;
 
-import javax.swing.*;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.DefaultListModel;
+import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JFrame;
+import javax.swing.JList;
+import javax.swing.JPanel;
+import javax.swing.SwingConstants;
 
-import com.fazecast.jSerialComm.*;
+import com.fazecast.jSerialComm.SerialPort;
 
 public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListener
 {
+	private static final long serialVersionUID = -675044838765654075L;
+	
 	public static final Color[] CHANNEL_COLORS = {
 		Color.RED,
 		Color.BLUE,
@@ -43,24 +52,24 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 	
 	private Thread thread;
 	private JFrame frame;
-	private BufferedReader in;
 	
-	private JPanel commsPanel = new JPanel();
+	private JPanel commsPanel;
 	DefaultListModel<String> listModel;
 	private JList<String> list;
 	private JButton connect;
 	private JButton refresh;
 	private String connectedPortName = null;
 	private boolean refreshing = false;
+	private boolean connected = false;
 	
-	private JPanel channelsPanel = new JPanel();
+	private JPanel channelsPanel;
+	private JButton clear;
 	private ArrayList<JCheckBox> checkBoxes = new ArrayList<JCheckBox>();
 	
 	private ArrayList<ArrayList<DataPoint>> channels = new ArrayList<ArrayList<DataPoint>>();
 	private int time = 0;
 	
-	private boolean logging = false;
-	private boolean painting = false;
+	private CountDownLatch latch = new CountDownLatch(0);
 	
 	SerialDataPlotterV2()
 	{
@@ -91,6 +100,14 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 		channelsPanel = new JPanel();
 		channelsPanel.setPreferredSize(new Dimension(128,0));
 		channelsPanel.setMaximumSize(new Dimension(128,10000));
+		channelsPanel.setLayout(new BoxLayout(channelsPanel, BoxLayout.PAGE_AXIS));
+		//channelsPanel.setAlignmentX(Component.CENTER_ALIGNMENT);
+		
+		clear = new JButton("Clear");
+		clear.addActionListener(this);
+		//clear.setAlignmentX(Component.CENTER_ALIGNMENT);
+		channelsPanel.add(clear);
+		
 		frame.add(channelsPanel);
 		frame.add(Box.createRigidArea(new Dimension(5, 0)));
 		
@@ -102,6 +119,30 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 		
 		thread = new Thread(this);
 		thread.start();
+		
+		new Thread(new Runnable(){
+			@Override
+			public void run()
+			{
+				try
+				{
+					int i = 0;
+					float x = 0;
+					while(true)
+					{
+						logData(String.format("%.2f", Math.cos(x)));
+						x += 0.02;
+						Thread.sleep(1);
+						i++;
+						if(i % 1000 == 0)
+						{
+							Thread.sleep(1000);
+						}
+					}
+				}
+				catch(Exception ex){}
+			}
+		}).start();
 	}
 	
 	private void logData(String str)
@@ -126,11 +167,16 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 	
 	private void logData(float[] data)
 	{
-		while(painting)
+		try
 		{
-			try{Thread.sleep(1);}catch(Exception ex){}
+			latch.await();
 		}
-		logging = true;
+		catch (Exception ex)
+		{
+			ex.printStackTrace();
+		}
+		latch = new CountDownLatch(1);
+		
 		for(int i = 0; i < data.length; i++)
 		{
 			ArrayList<DataPoint> channel;
@@ -149,10 +195,44 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 		
 		time++;
 		repaint();
-		logging = false;
+		latch.countDown();
 	}
 	
-	private Color getColor(int i)
+	private void clear()
+	{
+		try
+		{
+			latch.await();
+		}
+		catch (Exception ex)
+		{
+			ex.printStackTrace();
+		}
+		latch = new CountDownLatch(1);
+		
+		time = 0;
+		
+		for(ArrayList<DataPoint> channel : channels)
+		{
+			channel.clear();
+		}
+		
+		channels.clear();
+		
+		for(JCheckBox checkBox : checkBoxes)
+		{
+			channelsPanel.remove(checkBox);
+		}
+		
+		checkBoxes.clear();
+		
+		frame.revalidate();
+		frame.repaint();
+		
+		latch.countDown();
+	}
+	
+	private static Color getColor(int i)
 	{
 		if(i < 0 || i >= CHANNEL_COLORS.length)
 		{
@@ -166,85 +246,89 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 	{
 		super.paintComponent(g);
 		
-		while(logging)
+		try
 		{
-			try{Thread.sleep(1);}catch(Exception ex){}
-		}
-		painting = true;
-		
-		g.setColor(Color.WHITE);
-		g.fillRect(0, 0, this.getWidth(), this.getHeight());
-		
-		float minValue = Float.MAX_VALUE;
-		float maxValue = Float.MIN_VALUE;
-		
-		for(int i = 0; i < channels.size(); i++)
-		{
-			if(!checkBoxIsTicked(i)) continue;
-			ArrayList<DataPoint> channel = channels.get(i);
-			for(DataPoint dp : channel)
-			{
-				float value = dp.v;
-				if(value < minValue)
-				{
-					minValue = value;
-				}
-				if(value > maxValue)
-				{
-					maxValue = value;
-				}
-			}
-		}
-		
-		Graphics2D g2d = (Graphics2D)g;
-		float midValue = (minValue + maxValue) / 2;
-		float scaling = getHeight() / (maxValue - minValue);
-		g2d.setColor(Color.BLACK);
-		g2d.setStroke(new BasicStroke(0.0001f));
-		Shape axis = new Line2D.Float(0, scaling * midValue, this.getWidth(), scaling * midValue);
-		g2d.translate(0, getHeight() / 2);
-		g2d.draw(axis);
-
-		g2d.setColor(Color.BLACK);
-		int magnitude = (int) Math.log10(maxValue - minValue);
-		double power = Math.pow(10, magnitude - 1);
-		for(int i = -10; i <= 10; i++)
-		{
-			double y1 = scaling * (midValue - power * i);
-			Shape tick1 = new Line2D.Double(32, y1, 48, y1);
-			//g2d.drawString((10*power*i) + "", 0, (float)y1);
+			latch.await();
+			latch = new CountDownLatch(1);
 			
-			double y2 = scaling * (midValue - 10 * power * i);
-			Shape tick2 = new Line2D.Double(32, y2, 64, y2);
-			g2d.drawString((10*power*i) + "", 0, (float)y2);
-
-			g2d.draw(tick1);
-			g2d.draw(tick2);
-		}
-		
-		g2d.setStroke(new BasicStroke(5f));
-		for(int i = 0; i < channels.size(); i++)
-		{
-			if(!checkBoxIsTicked(i)) continue;
-			ArrayList<DataPoint> channel = channels.get(i);
-			g2d.setColor(getColor(i));
-			DataPoint lastDP = null;
-			for(DataPoint dp : channel)
+			g.setColor(Color.WHITE);
+			g.fillRect(0, 0, this.getWidth(), this.getHeight());
+			
+			float minValue = Float.MAX_VALUE;
+			float maxValue = Float.MIN_VALUE;
+			
+			for(int i = 0; i < channels.size(); i++)
 			{
-				if(lastDP != null)
+				if(!checkBoxIsTicked(i)) continue;
+				ArrayList<DataPoint> channel = channels.get(i);
+				for(DataPoint dp : channel)
 				{
-					float x1 = getWidth() * lastDP.t / time - 1;
-					float y1 = scaling * (midValue - lastDP.v) - 1;
-					float x2 = getWidth() * dp.t / time - 1;
-					float y2 = scaling * (midValue - dp.v) - 1;
-					Shape line = new Line2D.Float(x1, y1, x2, y2);
-					g2d.draw(line);
+					float value = dp.v;
+					if(value < minValue)
+					{
+						minValue = value;
+					}
+					if(value > maxValue)
+					{
+						maxValue = value;
+					}
 				}
-				lastDP = dp;
 			}
+			
+			Graphics2D g2d = (Graphics2D)g;
+			float midValue = (minValue + maxValue) / 2;
+			float scaling = getHeight() / (maxValue - minValue);
+			g2d.setColor(Color.BLACK);
+			g2d.setStroke(new BasicStroke(2f));
+			Shape axis = new Line2D.Float(0, scaling * midValue, this.getWidth(), scaling * midValue);
+			g2d.translate(0, getHeight() / 2);
+			g2d.draw(axis);
+	
+			g2d.setColor(Color.BLACK);
+			int magnitude = (int) Math.log10(maxValue - minValue);
+			double power = Math.pow(10, magnitude - 1);
+			for(int i = -10; i <= 10; i++)
+			{
+				double y1 = scaling * (midValue - power * i);
+				Shape tick1 = new Line2D.Double(32, y1, 48, y1);
+				//g2d.drawString((10*power*i) + "", 0, (float)y1);
+				
+				double y2 = scaling * (midValue - 10 * power * i);
+				Shape tick2 = new Line2D.Double(32, y2, 64, y2);
+				g2d.drawString((10*power*i) + "", 0, (float)y2);
+	
+				g2d.draw(tick1);
+				g2d.draw(tick2);
+			}
+			
+			g2d.setStroke(new BasicStroke(3f));
+			for(int i = 0; i < channels.size(); i++)
+			{
+				if(!checkBoxIsTicked(i)) continue;
+				ArrayList<DataPoint> channel = channels.get(i);
+				g2d.setColor(getColor(i));
+				DataPoint lastDP = null;
+				for(DataPoint dp : channel)
+				{
+					if(lastDP != null)
+					{
+						float x1 = getWidth() * lastDP.t / time - 1;
+						float y1 = scaling * (midValue - lastDP.v) - 1;
+						float x2 = getWidth() * dp.t / time - 1;
+						float y2 = scaling * (midValue - dp.v) - 1;
+						Shape line = new Line2D.Float(x1, y1, x2, y2);
+						g2d.draw(line);
+					}
+					lastDP = dp;
+				}
+			}
+			
+			latch.countDown();
 		}
-		
-		painting = false;
+		catch (Exception ex)
+		{
+			ex.printStackTrace();
+		}
 	}
 	
 	private boolean checkBoxIsTicked(int i)
@@ -302,12 +386,16 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 					port.setComPortTimeouts(SerialPort.TIMEOUT_SCANNER, 0, 0);
 					scanner = new Scanner(port.getInputStream());
 					
+					connected = true;
+					refresh.setEnabled(false);
 					while(connectedPortName != null)
 					{
 						String line = scanner.nextLine();
 						logData(line);
 						System.out.println(line);
 					}
+					connected = false;
+					refresh.setEnabled(true);
 				}
 				catch(Exception ex)
 				{
@@ -315,6 +403,8 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 				}
 				finally
 				{
+					connected = false;
+					refresh.setEnabled(true);
 					connectedPortName = null;
 					connect.setText(CONNECT);
 					try
@@ -352,6 +442,10 @@ public class SerialDataPlotterV2 extends JPanel implements Runnable, ActionListe
 		else if(ev.getSource() == refresh)
 		{
 			refreshing = true;
+		}
+		else if(ev.getSource() == clear)
+		{
+			clear();
 		}
 	}
 	
